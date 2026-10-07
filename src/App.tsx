@@ -26,6 +26,7 @@ const STYLES = [
   { id: 'watercolor', name: 'Акварель', emoji: '🎨', description: 'бумага · мазки · мягкие цвета', badge: 'Рисованная вручную' },
   { id: 'anime', name: 'Аниме', emoji: '⭐', description: 'выразительные глаза · cel-shading', badge: 'Аниме-стиль' },
   { id: 'clay', name: 'Пластилин', emoji: '🧸', description: 'объём · мягкий свет · стоп-моушн', badge: 'Будто слепили руками' },
+  { id: 'doll', name: 'Кукольный', emoji: '🎀', description: 'глянцевые детали · мягкий свет', badge: 'Как игрушечная кукла' },
 ];
 
 const TIPS = [
@@ -212,14 +213,10 @@ const point = (event: React.PointerEvent<HTMLCanvasElement>) => {
       target[3] === replacement[3]
     ) return;
 
-    // Новый алгоритм заливки:
-    // 1) Находим обычным flood-fill исходную область цвета.
-    // 2) Отдельно определяем внешний фон, начиная от краёв canvas.
-    // 3) Всё, что находится внутри замкнутого контура и связано с исходной
-    //    областью, считаем внутренней частью рисунка. Поэтому внутренний
-    //    anti-aliasing/"призрачная" линия больше не остаётся.
-    // 4) Сам внешний контур сохраняем: это тёмные пиксели, которые касаются
-    //    внешнего фона. Их цвет не заменяем.
+    // Сглаживание контура создаёт несколько светлых пикселей между заливкой
+    // и тёмной линией. Обычный flood-fill их не всегда забирает, поэтому
+    // сначала заполняем область, а затем аккуратно «подводим» цвет к контуру.
+    // Тёмные пиксели контура при этом не трогаем.
     const tolerance = 220;
     const matches = (i: number) => {
       const dr = data[i] - target[0];
@@ -228,10 +225,9 @@ const point = (event: React.PointerEvent<HTMLCanvasElement>) => {
       return (dr * dr + dg * dg + db * db) <= tolerance * tolerance;
     };
 
-    const pixelCount = width * height;
     const stack: Array<[number, number]> = [[startX, startY]];
-    const visited = new Uint8Array(pixelCount);
-    const filled = new Uint8Array(pixelCount);
+    const visited = new Uint8Array(width * height);
+    const filled = new Uint8Array(width * height);
 
     while (stack.length) {
       const [px, py] = stack.pop()!;
@@ -245,6 +241,11 @@ const point = (event: React.PointerEvent<HTMLCanvasElement>) => {
       if (!matches(i)) continue;
 
       filled[pos] = 1;
+      data[i] = replacement[0];
+      data[i + 1] = replacement[1];
+      data[i + 2] = replacement[2];
+      data[i + 3] = 255;
+
       stack.push(
         [px + 1, py],
         [px - 1, py],
@@ -253,132 +254,49 @@ const point = (event: React.PointerEvent<HTMLCanvasElement>) => {
       );
     }
 
-    // Фон определяем снаружи. Берём только действительно почти белые пиксели,
-    // чтобы антиалиасинговый край рисунка не стал проходом наружу.
-    const outside = new Uint8Array(pixelCount);
-    const backgroundStack: Array<[number, number]> = [];
+    // Убираем тонкий светлый ореол у сглаженного контура. Расширяем маску
+    // только на 2 физических пикселя и только в светлые пиксели — сам тёмный
+    // контур остаётся нетронутым.
+    let edge = filled;
+    for (let pass = 0; pass < 2; pass += 1) {
+      const next = new Uint8Array(width * height);
+      for (let py = 0; py < height; py += 1) {
+        for (let px = 0; px < width; px += 1) {
+          const pos = py * width + px;
+          if (edge[pos]) continue;
 
-    const isBackground = (pos: number) => {
-      const i = pos * 4;
-      const alpha = data[i + 3];
-      const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      return alpha > 0 && brightness >= 248;
-    };
-
-    for (let px = 0; px < width; px += 1) {
-      if (isBackground(px)) backgroundStack.push([px, 0]);
-      if (height > 1 && isBackground((height - 1) * width + px)) {
-        backgroundStack.push([px, height - 1]);
-      }
-    }
-    for (let py = 1; py < height - 1; py += 1) {
-      if (isBackground(py * width)) backgroundStack.push([0, py]);
-      if (width > 1 && isBackground(py * width + width - 1)) {
-        backgroundStack.push([width - 1, py]);
-      }
-    }
-
-    while (backgroundStack.length) {
-      const [px, py] = backgroundStack.pop()!;
-      if (px < 0 || py < 0 || px >= width || py >= height) continue;
-      const pos = py * width + px;
-      if (outside[pos] || !isBackground(pos)) continue;
-      outside[pos] = 1;
-      backgroundStack.push(
-        [px + 1, py],
-        [px - 1, py],
-        [px, py + 1],
-        [px, py - 1],
-      );
-    }
-
-    // Сохраняем только внешний контур. Это тёмные пиксели, которые реально
-    // соприкасаются с фоном. Внутренние серые/светлые пиксели не являются
-    // контуром и будут полностью заменены цветом заливки.
-    const outline = new Uint8Array(pixelCount);
-    for (let py = 1; py < height - 1; py += 1) {
-      for (let px = 1; px < width - 1; px += 1) {
-        const pos = py * width + px;
-        if (outside[pos]) continue;
-
-        const i = pos * 4;
-        const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-        if (brightness > 115) continue;
-
-        let touchesOutside = false;
-        for (let oy = -1; oy <= 1 && !touchesOutside; oy += 1) {
-          for (let ox = -1; ox <= 1; ox += 1) {
-            if (outside[(py + oy) * width + (px + ox)]) {
-              touchesOutside = true;
-              break;
+          let nearFill = false;
+          for (let oy = -1; oy <= 1 && !nearFill; oy += 1) {
+            for (let ox = -1; ox <= 1; ox += 1) {
+              const nx = px + ox;
+              const ny = py + oy;
+              if (nx >= 0 && ny >= 0 && nx < width && ny < height && edge[ny * width + nx]) {
+                nearFill = true;
+              }
             }
           }
-        }
-        if (touchesOutside) outline[pos] = 1;
-      }
-    }
+          if (!nearFill) continue;
 
-    // Внутри замкнутого рисунка закрашиваем всё, что не является внешним
-    // контуром. В отличие от прежних проходов здесь нет фиксированного
-    // "2/9/12 пикселей": размер области определяется самим контуром.
-    const paintStack: number[] = [];
-    const paintVisited = new Uint8Array(pixelCount);
-    for (let py = 0; py < height; py += 1) {
-      for (let px = 0; px < width; px += 1) {
-        const pos = py * width + px;
-        if (filled[pos]) paintStack.push(pos);
-      }
-    }
+          const i = pos * 4;
+          const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+          const distanceFromWhite = Math.sqrt(
+            (255 - data[i]) ** 2 +
+            (255 - data[i + 1]) ** 2 +
+            (255 - data[i + 2]) ** 2,
+          );
 
-    while (paintStack.length) {
-      const pos = paintStack.pop()!;
-      if (paintVisited[pos]) continue;
-      paintVisited[pos] = 1;
-
-      if (outside[pos] || outline[pos]) continue;
-
-      const i = pos * 4;
-      data[i] = replacement[0];
-      data[i + 1] = replacement[1];
-      data[i + 2] = replacement[2];
-      data[i + 3] = 255;
-
-      const px = pos % width;
-      const py = Math.floor(pos / width);
-      if (px > 0) paintStack.push(pos - 1);
-      if (px < width - 1) paintStack.push(pos + 1);
-      if (py > 0) paintStack.push(pos - width);
-      if (py < height - 1) paintStack.push(pos + width);
-    }
-
-    // Если контур очень тонкий и внутри остались отдельные anti-aliasing
-    // пиксели, один финальный проход убирает их, но только внутри области.
-    for (let py = 1; py < height - 1; py += 1) {
-      for (let px = 1; px < width - 1; px += 1) {
-        const pos = py * width + px;
-        if (outside[pos] || outline[pos]) continue;
-
-        const i = pos * 4;
-        const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-        if (brightness > 245) continue;
-
-        let nearPaint = false;
-        for (let oy = -1; oy <= 1 && !nearPaint; oy += 1) {
-          for (let ox = -1; ox <= 1; ox += 1) {
-            const n = (py + oy) * width + (px + ox);
-            if (!outside[n] && !outline[n]) {
-              nearPaint = true;
-              break;
-            }
+          // Светлый anti-aliasing пиксель можно заменить цветом заливки;
+          // тёмная линия (и её насыщенные пиксели) останется на месте.
+          if (brightness >= 100 && distanceFromWhite <= 230) {
+            next[pos] = 1;
+            data[i] = replacement[0];
+            data[i + 1] = replacement[1];
+            data[i + 2] = replacement[2];
+            data[i + 3] = 255;
           }
         }
-        if (nearPaint) {
-          data[i] = replacement[0];
-          data[i + 1] = replacement[1];
-          data[i + 2] = replacement[2];
-          data[i + 3] = 255;
-        }
       }
+      edge = next;
     }
 
     ctx.putImageData(image, 0, 0);
