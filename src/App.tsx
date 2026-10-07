@@ -31,6 +31,7 @@ const STYLES = [
   { id: 'tarot', name: 'Таро', emoji: '🔮', description: 'мистика · символы · карта', badge: 'Как иллюстрированная карта' },
   { id: 'stickers', name: 'Стикеры', emoji: '✨', description: 'ярко · толстый контур · наклейка', badge: 'Как набор наклеек' },
   { id: 'y2k', name: 'Нулевые', emoji: '💿', description: 'Y2K · глянец · цифровой стиль', badge: 'Эстетика 2000-х' },
+  { id: 'rick-morty', name: 'Рик и Морти', emoji: '🛸', description: 'sci-fi · чёрный юмор · мультфильм', badge: 'Без реализма' },
 ];
 
 const TIPS = [

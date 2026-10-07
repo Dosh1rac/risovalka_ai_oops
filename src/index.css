@@ -201,6 +201,8 @@ input[type=range] { width: 100%; accent-color: #ff9c42; }
 .style-stickers .style-preview i { background:#fff; opacity:.62; box-shadow:0 0 0 2px rgba(255,255,255,.5); }
 .style-y2k .style-preview { background:linear-gradient(135deg,#8ed8ff,#d3a4ff 48%,#ff9ed6); }
 .style-y2k .style-preview i { background:linear-gradient(90deg,#fff,rgba(255,255,255,.15)); opacity:.55; }
+.style-rick-morty .style-preview { background:linear-gradient(135deg,#b8e3df,#7fb8c7 48%,#d7d86e); }
+.style-rick-morty .style-preview i { background:#fff; opacity:.35; }
 @media (max-width: 1100px) { .style-list { grid-template-columns:1fr; } }
 
 .panel-actions { margin-top: auto; display: grid; grid-template-columns: 1fr 1fr 42px; gap: 7px; }
