@@ -27,6 +27,10 @@ const STYLES = [
   { id: 'anime', name: 'Аниме', emoji: '⭐', description: 'выразительные глаза · cel-shading', badge: 'Аниме-стиль' },
   { id: 'clay', name: 'Пластилин', emoji: '🧸', description: 'объём · мягкий свет · стоп-моушн', badge: 'Будто слепили руками' },
   { id: 'doll', name: 'Кукольный', emoji: '🎀', description: 'глянцевые детали · мягкий свет', badge: 'Как игрушечная кукла' },
+  { id: 'impressionism', name: 'Импрессионизм', emoji: '🖼️', description: 'живые мазки · свет · цвет', badge: 'Как настоящая картина' },
+  { id: 'tarot', name: 'Таро', emoji: '🔮', description: 'мистика · символы · карта', badge: 'Как иллюстрированная карта' },
+  { id: 'stickers', name: 'Стикеры', emoji: '✨', description: 'ярко · толстый контур · наклейка', badge: 'Как набор наклеек' },
+  { id: 'y2k', name: 'Нулевые', emoji: '💿', description: 'Y2K · глянец · цифровой стиль', badge: 'Эстетика 2000-х' },
 ];
 
 const TIPS = [
@@ -461,7 +465,7 @@ const point = (event: React.PointerEvent<HTMLCanvasElement>) => {
           </section>
 
           <section>
-            <h3>Как оживить рисунок <span>6 стилей</span></h3>
+            <h3>Как оживить рисунок <span>11 стилей</span></h3>
             <div className="style-list">
               {STYLES.map((item) => (
                 <button key={item.id} className={`style-card style-${item.id} ${style === item.id ? 'selected' : ''}`} onClick={() => { setStyle(item.id); playSound('tap'); }}>
