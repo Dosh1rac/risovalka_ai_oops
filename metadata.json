@@ -1,0 +1,6 @@
+{
+  "name": "nanobanana — Интерактивная мульт-доска с ИИ",
+  "description": "Детская рисовалка: исходный рисунок передаётся в Nano Banana 2 как reference image и превращается в мультяшную версию без подмены сюжета.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["SERVER_SIDE_IMAGE_GENERATION", "TOUCH_CANVAS"]
+}
