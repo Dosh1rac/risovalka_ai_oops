@@ -28,7 +28,7 @@ const env = parseEnv(ENV_PATH);
 for (const [k, v] of Object.entries(env)) if (!process.env[k]) process.env[k] = v;
 
 const KEY = (process.env.POLZA_API_KEY || '').trim();
-const MODEL = 'google/gemini-3.1-flash-image-preview';
+const MODEL = 'google/gemini-nano-banana-2.1';
 const ENDPOINT = 'https://polza.ai/api/v1/media';
 const STORAGE_ENDPOINT = 'https://polza.ai/api/v1/storage/upload';
 const STATUS_ENDPOINT = 'https://polza.ai/api/v1/media';
@@ -49,7 +49,6 @@ const STYLES: Record<string, string> = {
   impressionism: `a refined Impressionist oil painting: visible short and layered brushstrokes, luminous natural light, broken color, vibrant but harmonious palette, atmospheric depth, painterly edges and subtle canvas texture. Make it look like a finished museum-quality painting while preserving the child's original shapes and composition.`,
   tarot: `a richly illustrated tarot-card aesthetic, fully non-photorealistic and hand-drawn: ornate decorative frame, symbolic composition, mystical stars and celestial motifs, elegant engraved linework, flat-to-painterly illustrated color, decorative gold accents, storybook fantasy atmosphere, clear iconic shapes, whimsical rather than realistic. Treat the child's drawing as the exact source of the subject and composition. Do not invent a real person, photorealistic face, photographic lighting, or realistic human anatomy. If a person-like shape is present, render it as a stylized illustrated figure. No text, logos, or real-world celebrity likenesses.`,
   stickers: `a playful premium sticker-sheet aesthetic: bold clean outer contour, simplified polished shapes, bright cheerful colors, crisp flat shading, subtle glossy highlights, white sticker border around each distinct subject, compact graphic composition. Preserve every visible object from the child's drawing and do not add unrelated sticker characters or decorations.`,
-  y2k: `a polished Y2K digital aesthetic: glossy gradients, chrome-like highlights, translucent plastic details, playful early-2000s digital design, soft lens glow, subtle sparkle, candy colors and clean graphic forms. Keep the child's original subject, silhouette and composition; style it with Y2K materials and lighting without adding unrelated objects, text, logos, or characters.`,
   'rick-morty': `a non-photorealistic adult animated sci-fi comedy cartoon aesthetic associated with irreverent space adventures: loose expressive ink outlines, deliberately imperfect hand-drawn linework, flat cel colors, limited shading, quirky simplified shapes, exaggerated cartoon poses, offbeat alien/sci-fi visual language, muted teal, yellow, green and purple accents, energetic 2D animation finish. Preserve the child's original subject and composition. Do not create photorealism, realistic human faces, realistic anatomy, photographic lighting, or a live-action look. Keep any people as stylized cartoon figures only. Do not add named characters, logos, episode references, text, or unrelated props.`,
 };
 
