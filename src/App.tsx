@@ -49,7 +49,7 @@ type Tool = 'brush' | 'eraser' | 'rainbow' | 'fill' | 'pan';
 type Toast = { kind: 'error' | 'ok'; text: string } | null;
 type HistoryEntry = { image: ImageData; blank: boolean };
 
-const HISTORY_LIMIT = 20;
+const HISTORY_LIMIT = 5;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 2;
 
@@ -817,7 +817,7 @@ export default function App() {
               <button type="button" aria-label="Приблизить" title="Приблизить" onClick={() => changeZoom(zoom + 0.25)}>+</button>
             </div>
 
-            <div className="board-hint">👆 Рисуй пальцем, мышкой или стилусом</div>
+            <div className="board-hint">Полотно большое: выбери «Двигать холст», чтобы перейти к другому месту</div>
           </div>
 
           <button className="magic-btn" disabled={loading} onClick={transform}>

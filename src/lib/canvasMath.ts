@@ -2,8 +2,8 @@
 
 /** Внутреннее разрешение холста. Оно НЕ меняется при ресайзе окна, поэтому
  *  рисунок никогда не пересэмплируется и не «мылится». */
-export const CANVAS_W = 1600;
-export const CANVAS_H = 1000;
+export const CANVAS_W = 9600;
+export const CANVAS_H = 6000;
 
 export type Rect = { left: number; top: number; width: number; height: number };
 
@@ -11,8 +11,10 @@ export type Rect = { left: number; top: number; width: number; height: number };
 export function fitSize(areaW: number, areaH: number, pad = 20) {
   const availW = Math.max(120, areaW - pad * 2);
   const availH = Math.max(120, areaH - pad * 2);
-  const scale = Math.min(availW / CANVAS_W, availH / CANVAS_H);
-  return { w: Math.max(1, Math.floor(CANVAS_W * scale)), h: Math.max(1, Math.floor(CANVAS_H * scale)) };
+  // Рендерим холст в 3 раза крупнее области просмотра: пользователь видит
+  // только участок большого полотна и может перемещаться по другим участкам.
+  const scale = Math.min(availW / 1600, availH / 1000);
+  return { w: Math.max(1, Math.floor(1600 * scale * 6)), h: Math.max(1, Math.floor(1000 * scale * 6)) };
 }
 
 /**
