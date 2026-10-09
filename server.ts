@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
@@ -28,7 +29,12 @@ const env = parseEnv(ENV_PATH);
 for (const [k, v] of Object.entries(env)) if (!process.env[k]) process.env[k] = v;
 
 const KEY = (process.env.POLZA_API_KEY || '').trim();
-const MODEL = 'google/gemini-nano-banana-2.1';
+const APP_PASSWORD = (process.env.APP_PASSWORD || '').trim();
+const MODEL = process.env.POLZA_MODEL?.trim() || 'google/gemini-nano-banana-2.1';
+// Защита монет: пауза между генерациями и (необязательно) общий лимит за запуск сервера.
+const COOLDOWN_MS = Number(process.env.GENERATION_COOLDOWN_MS || 3000);
+const GENERATION_LIMIT = Number(process.env.GENERATION_LIMIT || 0); // 0 = без лимита
+let generationsStarted = 0;
 const ENDPOINT = 'https://polza.ai/api/v1/media';
 const STORAGE_ENDPOINT = 'https://polza.ai/api/v1/storage/upload';
 const STATUS_ENDPOINT = 'https://polza.ai/api/v1/media';
@@ -36,7 +42,16 @@ const POLL_INTERVAL_MS = 2000;
 const POLL_TIMEOUT_MS = Number(process.env.POLZA_TIMEOUT_MS || 180000);
 
 const app = express();
-app.use(express.json({ limit: '20mb' }));
+app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+// Для логина достаточно крошечного тела — большие запросы без авторизации не принимаем.
+app.use('/api/login', express.json({ limit: '2kb' }));
+app.use(express.json({ limit: '100kb' }));
 
 const STYLES: Record<string, string> = {
   'bright-cartoon': `a polished modern Western children's cartoon: friendly rounded shapes, bold smooth outlines, simple expressive forms, cheerful saturated colors, soft cel shading, playful proportions, clean animation-studio finish, readable silhouettes, bright family-friendly 2D illustration. Avoid Japanese anime aesthetics, manga linework, oversized anime eyes, dramatic anime lighting, or sharp stylized facial proportions.`,
@@ -49,11 +64,33 @@ const STYLES: Record<string, string> = {
   impressionism: `a refined Impressionist oil painting: visible short and layered brushstrokes, luminous natural light, broken color, vibrant but harmonious palette, atmospheric depth, painterly edges and subtle canvas texture. Make it look like a finished museum-quality painting while preserving the child's original shapes and composition.`,
   tarot: `a richly illustrated tarot-card aesthetic, fully non-photorealistic and hand-drawn: ornate decorative frame, symbolic composition, mystical stars and celestial motifs, elegant engraved linework, flat-to-painterly illustrated color, decorative gold accents, storybook fantasy atmosphere, clear iconic shapes, whimsical rather than realistic. Treat the child's drawing as the exact source of the subject and composition. Do not invent a real person, photorealistic face, photographic lighting, or realistic human anatomy. If a person-like shape is present, render it as a stylized illustrated figure. No text, logos, or real-world celebrity likenesses.`,
   stickers: `a playful premium sticker-sheet aesthetic: bold clean outer contour, simplified polished shapes, bright cheerful colors, crisp flat shading, subtle glossy highlights, white sticker border around each distinct subject, compact graphic composition. Preserve every visible object from the child's drawing and do not add unrelated sticker characters or decorations.`,
+  'treasure-island': `classic illustrated pirate treasure-adventure book style, aged treasure maps, tropical island atmosphere, warm parchment textures, dramatic ocean blues and golden highlights, hand-painted adventure illustration. Preserve only the objects and composition in the child's drawing; do not add unrelated pirates, ships, text or treasure unless drawn.`,
+  lego: `a toy-brick construction style with colorful interlocking plastic bricks, visible studs, block-built shapes, clean studio lighting and playful miniature diorama materials. Rebuild the exact drawn subjects as brick-built forms without adding unrelated characters or props.`,
+  roblox: `a blocky user-created 3D game aesthetic inspired by sandbox game worlds, simple cubic geometry, toy-like materials, bright colors and clean game-rendered lighting. Keep the original subjects and layout; do not add logos, UI, text or unrelated avatars.`,
+  origami: `an elegant origami paper-folding art style, crisp geometric creases, layered folded paper, subtle paper fibers and carefully shaped angular forms, with soft natural shadows. Transform the visible shapes into folded paper while preserving the original subject and composition; no unrelated objects.`,
   'rick-morty': `a non-photorealistic adult animated sci-fi comedy cartoon aesthetic associated with irreverent space adventures: loose expressive ink outlines, deliberately imperfect hand-drawn linework, flat cel colors, limited shading, quirky simplified shapes, exaggerated cartoon poses, offbeat alien/sci-fi visual language, muted teal, yellow, green and purple accents, energetic 2D animation finish. Preserve the child's original subject and composition. Do not create photorealism, realistic human faces, realistic anatomy, photographic lighting, or a live-action look. Keep any people as stylized cartoon figures only. Do not add named characters, logos, episode references, text, or unrelated props.`,
 };
 
+const STYLE_NAMES: Record<string, string> = {
+  'bright-cartoon': 'Bright cartoon',
+  comic: 'Comic book',
+  storybook: 'Fairy-tale storybook',
+  watercolor: 'Watercolor',
+  anime: 'Japanese anime',
+  clay: 'Clay animation',
+  doll: 'Collectible doll',
+  impressionism: 'Impressionism',
+  tarot: 'Tarot card',
+  stickers: 'Sticker sheet',
+  'treasure-island': 'Treasure Island adventure',
+  lego: 'Toy-brick (LEGO-like)',
+  roblox: 'Blocky sandbox game (Roblox-like)',
+  origami: 'Origami',
+  'rick-morty': 'Adult sci-fi animated comedy',
+};
+
 function promptFor(style: string) {
-  return `EDIT THE PROVIDED CHILD DRAWING. The provided image is the source of truth.\n\nTransform the exact drawing into this visual direction: ${STYLES[style] || STYLES['bright-cartoon']}.\n\nSTYLE IS A VISUAL TREATMENT, NOT A NEW SUBJECT. Do not invent a new scene just because the chosen style has familiar tropes.\n\nSTRICT IMAGE-TO-IMAGE RULES:\n- Keep the same subject(s) that are actually visible.\n- Keep the same approximate number, position, silhouette, orientation and relative size of objects.\n- Preserve distinctive marks from the child's drawing.\n- Do NOT guess a different object.\n- Do NOT turn the drawing into a cat, dog, person, rocket, banana, SpongeBob or another familiar subject unless that subject is visibly drawn.\n- Do NOT add unsupported characters, animals, props, text, logos or stickers.\n- If the drawing is ambiguous, preserve its visible shapes instead of interpreting them as something else.\n- Keep the overall composition and a clean light background unless the chosen style naturally calls for subtle paper/diorama texture.\n- Apply the chosen visual medium strongly enough that the result is unmistakably different from the default cartoon.\n- Do not add generic style mascots, castles, superheroes, speech bubbles, anime characters, fairy creatures or other decorations unless they are present in the child's drawing.\n- This is an image edit, not a text-to-image reinterpretation.\n\nThe input image has priority over every assumption in this prompt.`;
+  return `EDIT THE PROVIDED CHILD DRAWING. The provided image is the source of truth.\n\nSELECTED STYLE: "${STYLE_NAMES[style] || style}". Transform the exact drawing into this visual direction: ${STYLES[style]}.\n\nSTYLE IS A VISUAL TREATMENT, NOT A NEW SUBJECT. Do not invent a new scene just because the chosen style has familiar tropes.\n\nSTRICT IMAGE-TO-IMAGE RULES:\n- Keep the same subject(s) that are actually visible.\n- Keep the same approximate number, position, silhouette, orientation and relative size of objects.\n- Preserve distinctive marks from the child's drawing.\n- Do NOT guess a different object.\n- Do NOT turn the drawing into a cat, dog, person, rocket, banana, SpongeBob or another familiar subject unless that subject is visibly drawn.\n- Do NOT add unsupported characters, animals, props, text, logos or stickers.\n- If the drawing is ambiguous, preserve its visible shapes instead of interpreting them as something else.\n- Keep the overall composition and a clean light background unless the chosen style naturally calls for subtle paper/diorama texture.\n- Apply the selected style ("${STYLE_NAMES[style] || style}") strongly enough that it is clearly and unmistakably recognizable. Do not fall back to a generic cartoon look unless the selected style is the cartoon one.\n- Do not add generic style mascots, castles, superheroes, speech bubbles, anime characters, fairy creatures or other decorations unless they are present in the child's drawing.\n- This is an image edit, not a text-to-image reinterpretation.\n\nThe input image has priority over every assumption in this prompt.`;
 }
 
 function extractImage(data: any): string | null {
@@ -70,6 +107,21 @@ function extractImage(data: any): string | null {
   const value = candidates.find((x) => typeof x === 'string' && x.length > 0);
   if (!value) return null;
   return /^(https?:\/\/|data:)/.test(value) ? value : `data:image/png;base64,${value}`;
+}
+
+// Отдаём картинку как data URL: так её можно скачать без CORS и ссылка не «протухнет».
+async function toDataUrl(image: string): Promise<string> {
+  if (image.startsWith('data:')) return image;
+  try {
+    const r = await fetch(image);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const type = (r.headers.get('content-type') || 'image/png').split(';')[0];
+    const buf = Buffer.from(await r.arrayBuffer());
+    return `data:${type};base64,${buf.toString('base64')}`;
+  } catch (e) {
+    console.warn('⚠️ Не удалось встроить результат как data URL, отдаю ссылку:', e instanceof Error ? e.message : e);
+    return image;
+  }
 }
 
 async function parseResponse(r: Response) {
@@ -128,10 +180,11 @@ async function getMediaStatus(id: string) {
   return data;
 }
 
-async function waitForMedia(id: string): Promise<string> {
+async function waitForMedia(id: string, shouldStop: () => boolean = () => false): Promise<string> {
   const started = Date.now();
   let lastStatus = '';
   while (Date.now() - started < POLL_TIMEOUT_MS) {
+    if (shouldStop()) throw new Error('Клиент закрыл экран результата — ожидание остановлено.');
     const data = await getMediaStatus(id);
     const status = String(data?.status || '').toLowerCase();
     if (status && status !== lastStatus) {
@@ -153,19 +206,108 @@ async function waitForMedia(id: string): Promise<string> {
   throw new Error(`Polza не завершила генерацию за ${Math.round(POLL_TIMEOUT_MS / 1000)} сек.`);
 }
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, configured: Boolean(KEY), model: MODEL, endpoint: ENDPOINT, envFile: ENV_PATH });
+type Session = { expires: number; lastGeneration: number; busy: boolean };
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const sessions = new Map<string, Session>();
+const loginAttempts = new Map<string, { fails: number; blockedUntil: number }>();
+const MAX_LOGIN_FAILS = 5;
+const LOGIN_BLOCK_MS = 5 * 60 * 1000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, s] of sessions) if (s.expires < now) sessions.delete(token);
+  for (const [ip, a] of loginAttempts) if (a.blockedUntil < now && a.fails === 0) loginAttempts.delete(ip);
+}, 10 * 60 * 1000).unref();
+
+const sha256 = (v: string) => crypto.createHash('sha256').update(v).digest();
+function passwordMatches(input: string) {
+  // Сравнение за постоянное время: по времени ответа пароль не подобрать.
+  return crypto.timingSafeEqual(sha256(input), sha256(APP_PASSWORD));
+}
+
+function sessionToken(req: express.Request) {
+  const raw = req.headers.cookie || '';
+  const match = raw.match(/(?:^|;\s*)drawing_session=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+function getSession(req: express.Request): Session | null {
+  const token = sessionToken(req);
+  const s = token ? sessions.get(token) : undefined;
+  if (!s) return null;
+  if (s.expires < Date.now()) { sessions.delete(token); return null; }
+  return s;
+}
+function cookieFlags() {
+  const secure = process.env.NODE_ENV === 'production' || process.env.COOKIE_SECURE === 'true';
+  return `HttpOnly; SameSite=Strict; Path=/${secure ? '; Secure' : ''}`;
+}
+function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!APP_PASSWORD) return res.status(503).json({ success: false, detail: 'Авторизация не настроена: добавьте APP_PASSWORD в .env.' });
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ success: false, detail: 'Сначала войдите в приложение.' });
+  res.locals.session = session;
+  next();
+}
+
+app.get('/api/session', (req, res) => { res.json({ authenticated: Boolean(APP_PASSWORD && getSession(req)) }); });
+
+app.post('/api/login', (req, res) => {
+  if (!APP_PASSWORD) return res.status(503).json({ detail: 'Доступ закрыт: задайте APP_PASSWORD в .env.' });
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  const attempt = loginAttempts.get(ip) ?? { fails: 0, blockedUntil: 0 };
+  if (attempt.blockedUntil > now) {
+    const sec = Math.ceil((attempt.blockedUntil - now) / 1000);
+    return res.status(429).json({ detail: `Слишком много попыток. Подождите ${sec} сек.` });
+  }
+  const submitted = String(req.body?.password ?? '');
+  if (submitted.length > 512 || !passwordMatches(submitted)) {
+    attempt.fails += 1;
+    if (attempt.fails >= MAX_LOGIN_FAILS) { attempt.blockedUntil = now + LOGIN_BLOCK_MS; attempt.fails = 0; console.warn(`🔒 Много неверных паролей с ${ip}: блокировка на 5 минут`); }
+    loginAttempts.set(ip, attempt);
+    return res.status(401).json({ detail: 'Неверный пароль.' });
+  }
+  loginAttempts.delete(ip);
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, { expires: now + SESSION_TTL_MS, lastGeneration: 0, busy: false });
+  res.setHeader('Set-Cookie', `drawing_session=${token}; ${cookieFlags()}; Max-Age=${SESSION_TTL_MS / 1000}`);
+  res.json({ success: true });
 });
 
-app.post('/api/transform', async (req, res) => {
+app.post('/api/logout', requireAuth, (req, res) => {
+  sessions.delete(sessionToken(req));
+  res.setHeader('Set-Cookie', `drawing_session=; ${cookieFlags()}; Max-Age=0`);
+  res.json({ success: true });
+});
+
+app.get('/api/health', (_req, res) => {
+  if (!getSession(_req)) return res.json({ ok: true });
+  res.json({ ok: true, configured: Boolean(KEY), authConfigured: Boolean(APP_PASSWORD), model: MODEL, generationsStarted, generationLimit: GENERATION_LIMIT || null });
+});
+
+// Сначала проверяем авторизацию и только потом читаем большое тело запроса.
+app.post('/api/transform', requireAuth, express.json({ limit: '20mb' }), async (req, res) => {
+  const session = res.locals.session as Session;
+  let clientGone = false;
+  res.on('close', () => { if (!res.writableEnded) clientGone = true; });
+  let locked = false;
   try {
     if (!KEY) return res.status(503).json({ success: false, detail: `POLZA_API_KEY не найден. Создай файл ${ENV_PATH}` });
     const image = String(req.body?.image || '').trim();
-    const style = String(req.body?.style || 'bright-cartoon');
+    const style = String(req.body?.style || '');
+    if (!Object.prototype.hasOwnProperty.call(STYLES, style)) return res.status(400).json({ success: false, detail: `Неизвестный стиль: «${style}».` });
     if (!image.startsWith('data:image/')) return res.status(400).json({ success: false, detail: 'Canvas должен передать PNG/JPEG Data URL.' });
     if (image.length > 18 * 1024 * 1024) return res.status(413).json({ success: false, detail: 'Изображение слишком большое.' });
 
-    console.log(`🖼️ Canvas: ${(image.length / 1024).toFixed(0)} KB`);
+    if (session.busy) return res.status(429).json({ success: false, detail: 'Предыдущая генерация ещё идёт. Подождите немного.' });
+    const wait = session.lastGeneration + COOLDOWN_MS - Date.now();
+    if (wait > 0) return res.status(429).json({ success: false, detail: `Слишком быстро. Подождите ${Math.ceil(wait / 1000)} сек.` });
+    if (GENERATION_LIMIT > 0 && generationsStarted >= GENERATION_LIMIT) return res.status(403).json({ success: false, detail: 'Лимит генераций на сегодня исчерпан.' });
+    session.busy = true;
+    locked = true;
+    session.lastGeneration = Date.now();
+    generationsStarted += 1;
+    console.log(`🖼️ Canvas: ${(image.length / 1024).toFixed(0)} KB | стиль: ${style} | генерация №${generationsStarted}${GENERATION_LIMIT ? ` из ${GENERATION_LIMIT}` : ''}`);
 
     // Polza's Nano Banana 2 media API expects reference images under input.images.
     // The documented and reliable path is: Canvas -> Polza Storage -> public URL -> media job.
@@ -199,7 +341,7 @@ app.post('/api/transform', async (req, res) => {
     const immediateImage = extractImage(data);
     if (immediateImage) {
       console.log('✅ Polza сразу вернула изображение');
-      return res.json({ success: true, image: immediateImage });
+      return res.json({ success: true, image: await toDataUrl(immediateImage), style });
     }
 
     const requestId = data?.id || data?.requestId || data?.request_id || data?.taskId;
@@ -209,13 +351,15 @@ app.post('/api/transform', async (req, res) => {
     }
 
     console.log(`🆔 Задача Polza: ${requestId}`);
-    const result = await waitForMedia(String(requestId));
+    const result = await waitForMedia(String(requestId), () => clientGone);
     console.log('✅ Polza вернула готовое изображение');
-    return res.json({ success: true, image: result });
+    return res.json({ success: true, image: await toDataUrl(result), style });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error('❌ Transform:', msg);
-    return res.status(500).json({ success: false, detail: msg });
+    if (!res.headersSent) return res.status(500).json({ success: false, detail: msg });
+  } finally {
+    if (locked) session.busy = false;
   }
 });
 
