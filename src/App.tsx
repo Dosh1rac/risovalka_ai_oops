@@ -17,6 +17,11 @@ import {
   Volume2,
   VolumeX,
   X,
+  Images,
+  Play,
+  Pencil,
+  Check,
+  DownloadCloud,
 } from 'lucide-react';
 import { CANVAS_H, CANVAS_W, clientToCanvas, fitSize, floodFill, hexToRgb } from './lib/canvasMath';
 import { deleteSaved, listSaved, migrateLegacy, putSaved, type SavedCanvas } from './lib/savedCanvases';
@@ -48,6 +53,16 @@ const STYLES = [
 type Tool = 'brush' | 'eraser' | 'rainbow' | 'fill' | 'pan';
 type Toast = { kind: 'error' | 'ok'; text: string } | null;
 type HistoryEntry = { image: ImageData; blank: boolean };
+type GenerationJob = {
+  id: string;
+  image: string;
+  styleId: (typeof STYLES)[number]['id'];
+  status: 'queued' | 'running' | 'done' | 'error';
+  createdAt: number;
+  result?: string;
+  error?: string;
+};
+type GamePhase = 'setup' | 'drawing';
 
 const HISTORY_LIMIT = 5;
 const ZOOM_MIN = 0.5;
@@ -74,16 +89,46 @@ function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-/** Вписываем холст в белый квадрат: модель получает рисунок без растяжения. */
+/** Готовим отдельную копию для ИИ: находим нарисованные пиксели и крупно
+ * размещаем рисунок в квадрате. Размер и содержимое рабочего холста не меняются. */
 function squareDataUrl(src: HTMLCanvasElement): string {
   const side = Math.max(src.width, src.height);
+  const scan = document.createElement('canvas');
+  scan.width = src.width;
+  scan.height = src.height;
+  const scanCtx = scan.getContext('2d', { willReadFrequently: true })!;
+  scanCtx.drawImage(src, 0, 0);
+  const { data } = scanCtx.getImageData(0, 0, src.width, src.height);
+  let minX = src.width, minY = src.height, maxX = -1, maxY = -1;
+  // Белый/почти белый фон игнорируется; учитываем цветные и тёмные штрихи.
+  for (let y = 0; y < src.height; y++) {
+    for (let x = 0; x < src.width; x++) {
+      const i = (y * src.width + x) * 4;
+      const a = data[i + 3];
+      const isMark = a > 12 && (data[i] < 238 || data[i + 1] < 238 || data[i + 2] < 238);
+      if (isMark) { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); }
+    }
+  }
   const out = document.createElement('canvas');
   out.width = side;
   out.height = side;
   const ctx = out.getContext('2d')!;
   ctx.fillStyle = '#FFFFFF';
   ctx.fillRect(0, 0, side, side);
-  ctx.drawImage(src, (side - src.width) / 2, (side - src.height) / 2);
+  if (maxX < minX || maxY < minY) {
+    ctx.drawImage(src, (side - src.width) / 2, (side - src.height) / 2);
+    return out.toDataURL('image/png');
+  }
+  const pad = Math.max(12, Math.round(side * 0.07));
+  const cropX = Math.max(0, minX - pad), cropY = Math.max(0, minY - pad);
+  const cropRight = Math.min(src.width, maxX + 1 + pad), cropBottom = Math.min(src.height, maxY + 1 + pad);
+  const cropW = cropRight - cropX, cropH = cropBottom - cropY;
+  const target = side * 0.86;
+  const scale = Math.min(target / cropW, target / cropH);
+  const drawW = cropW * scale, drawH = cropH * scale;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, cropX, cropY, cropW, cropH, (side - drawW) / 2, (side - drawH) / 2, drawW, drawH);
   return out.toDataURL('image/png');
 }
 
@@ -111,7 +156,7 @@ export default function App() {
   const strokeRef = useRef<{ last: { x: number; y: number }; hue: number } | null>(null);
   const panStartRef = useRef<{ cx: number; cy: number; px: number; py: number } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const requestIdRef = useRef(0);
+  const activeJobRef = useRef<string | null>(null);
 
   const [auth, setAuth] = useState<'checking' | 'in' | 'out'>('checking');
   const [everAuthed, setEverAuthed] = useState(false);
@@ -136,12 +181,16 @@ export default function App() {
   const [toast, setToast] = useState<Toast>(null);
 
   const [resultOpen, setResultOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [jobs, setJobs] = useState<GenerationJob[]>([]);
   const [tipIndex, setTipIndex] = useState(0);
-  const [sourceImage, setSourceImage] = useState<string | null>(null);
-  const [resultImage, setResultImage] = useState<string | null>(null);
-  const [resultError, setResultError] = useState<string | null>(null);
-  const [resultStyleId, setResultStyleId] = useState<string>('bright-cartoon');
+
+  const [telephoneMode, setTelephoneMode] = useState(false);
+  const [gamePhase, setGamePhase] = useState<GamePhase>('setup');
+  const [challengeCategory, setChallengeCategory] = useState('Космос');
+  const [challengePrompt, setChallengePrompt] = useState('Придумай животное, которое живёт на другой планете');
+  const [lastChallengePrompt, setLastChallengePrompt] = useState('');
 
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [saved, setSaved] = useState<SavedCanvas[]>([]);
@@ -156,7 +205,10 @@ export default function App() {
   displayRef.current = display;
 
   const styleInfo = STYLES.find((s) => s.id === style)!;
-  const resultStyleName = STYLES.find((s) => s.id === resultStyleId)?.name ?? '';
+  const chosenJob = jobs.find((job) => job.id === selectedJobId);
+  const resultStyleName = STYLES.find((item) => item.id === chosenJob?.styleId)?.name ?? '';
+  const outstandingJobs = jobs.filter((job) => job.status === 'running' || job.status === 'queued').length;
+  const completedJobs = jobs.filter((job) => job.status === 'done').length;
 
   const getCtx = () => canvasRef.current?.getContext('2d', { willReadFrequently: true }) ?? null;
 
@@ -230,6 +282,9 @@ export default function App() {
 
   const logout = async () => {
     abortRef.current?.abort();
+    setJobs([]);
+    setSelectedJobId(null);
+    setQueueOpen(false);
     try { await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' }); } catch { /* noop */ }
     setResultOpen(false);
     setLibraryOpen(false);
@@ -436,6 +491,7 @@ export default function App() {
   }, [tool]);
 
   const onPointerDown = (e: RPointerEvent<HTMLDivElement>) => {
+    if (telephoneMode && gamePhase !== 'drawing') return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     // Игнорируем второй палец/ладонь, пока идёт штрих. Если предыдущий штрих
     // «завис» (потеряли pointerup), через 1.5 с без движения сбрасываем его.
@@ -509,86 +565,153 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---------- Генерация ----------
+  // ---------- Фоновая генерация: независимая очередь снимков холста ----------
   useEffect(() => {
-    if (!loading) return;
+    if (!outstandingJobs) return;
     const id = window.setInterval(() => setTipIndex((v) => v + 1), 2200);
     return () => window.clearInterval(id);
-  }, [loading]);
+  }, [outstandingJobs]);
 
-  const closeResult = () => {
-    requestIdRef.current += 1; // ответ отменённого запроса больше не нужен
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setLoading(false);
-    setResultOpen(false);
-    setResultImage(null);
-    setSourceImage(null);
-    setResultError(null);
-  };
-
-  const transform = async () => {
+  // Сохраняем каждый запрос как неизменяемый снимок. Пока сервер занят,
+  // остальные снимки ждут в очереди браузера, не блокируя рисование.
+  const transform = () => {
     const canvas = canvasRef.current;
-    if (loading) return;
     if (!canvas || !hasDrawing) {
       showToast('error', 'Сначала нарисуй что-нибудь на доске! 🎨');
       return;
     }
-    const image = squareDataUrl(canvas);
-    const requestId = ++requestIdRef.current;
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    // Экран результата открываем СРАЗУ: слева рисунок, справа индикатор ожидания.
-    setSourceImage(image);
-    setResultImage(null);
-    setResultError(null);
-    setResultStyleId(style);
-    setTipIndex(0);
-    setLoading(true);
-    setResultOpen(true);
-    playSound('magic');
-
-    try {
-      const response = await fetch('/api/transform', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image, style }),
-        signal: controller.signal,
-      });
-      const data = await response.json().catch(() => ({}));
-      if (requestId !== requestIdRef.current) return;
-      if (response.status === 401) {
-        setAuth('out');
-        throw new Error('Сессия закончилась. Войди заново — рисунок на доске сохранён.');
-      }
-      if (!response.ok || !data.success || !data.image) {
-        throw new Error(data.detail || data.error || 'Нейросеть не вернула изображение.');
-      }
-      setResultImage(data.image);
-      playSound('done');
-      confetti({ particleCount: 100, spread: 75, origin: { y: 0.6 } });
-    } catch (err) {
-      if (requestId !== requestIdRef.current || (err instanceof DOMException && err.name === 'AbortError')) return;
-      setResultError(err instanceof Error ? err.message : 'Не удалось преобразовать рисунок.');
-    } finally {
-      if (requestId === requestIdRef.current) setLoading(false);
+    if (jobs.filter((job) => job.status === 'queued' || job.status === 'running').length >= 6) {
+      showToast('error', 'В очереди уже 6 картинок. Дождись готового результата.');
+      return;
     }
+    const job: GenerationJob = {
+      id: uid(), image: squareDataUrl(canvas), styleId: style,
+      status: 'queued', createdAt: Date.now(),
+    };
+    setJobs((prev) => [...prev.filter((j) => j.status === 'queued' || j.status === 'running'),
+      ...prev.filter((j) => j.status !== 'queued' && j.status !== 'running').slice(-12), job]);
+    setTipIndex(0);
+    playSound('magic');
+    showToast('ok', 'Рисунок отправлен в очередь! Можно продолжать рисовать.');
   };
 
-  const downloadResult = () => {
-    if (!resultImage) return;
-    if (/^https?:/i.test(resultImage)) {
-      window.open(resultImage, '_blank', 'noopener');
+  // Backend разрешает только одну активную генерацию на сессию. Последовательно
+  // отправляем очередь, а при коротком cooldown или занятости делаем повтор.
+  useEffect(() => {
+    if (auth !== 'in' || activeJobRef.current) return;
+    const job = jobs.find((j) => j.status === 'queued');
+    if (!job) return;
+
+    activeJobRef.current = job.id;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setJobs((prev) => prev.map((j) => j.id === job.id ? { ...j, status: 'running' } : j));
+
+    const sleep = (ms: number) => new Promise<void>((resolve, reject) => {
+      if (controller.signal.aborted) { reject(new DOMException('Отменено', 'AbortError')); return; }
+      const timer = window.setTimeout(() => { controller.signal.removeEventListener('abort', cancel); resolve(); }, ms);
+      const cancel = () => { window.clearTimeout(timer); reject(new DOMException('Отменено', 'AbortError')); };
+      controller.signal.addEventListener('abort', cancel, { once: true });
+    });
+
+    const work = async () => {
+      try {
+        let finished = false;
+        for (let attempt = 0; attempt < 12; attempt++) {
+          const response = await fetch('/api/transform', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: job.image, style: job.styleId }),
+            signal: controller.signal,
+          });
+          const data = await response.json().catch(() => ({}));
+          if (response.status === 401) {
+            setAuth('out');
+            throw new Error('Сессия истекла. Войди снова, чтобы отправлять рисунки.');
+          }
+          if (response.status === 429 && /Слишком быстро|Предыдущая генерация/i.test(String(data.detail || ''))) {
+            await sleep(3500);
+            continue;
+          }
+          if (!response.ok || !data.success || !data.image) {
+            throw new Error(data.detail || data.error || 'Нейросеть не вернула изображение.');
+          }
+          setJobs((prev) => prev.map((j) => j.id === job.id ? { ...j, status: 'done', result: data.image } : j));
+          playSound('done');
+          showToast('ok', 'Готова новая картинка! Открой галерею результатов.');
+          finished = true;
+          break;
+        }
+        if (!finished) throw new Error('Сервер долго занят. Попробуй отправить рисунок ещё раз.');
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          const message = err instanceof Error ? err.message : 'Не удалось преобразовать рисунок.';
+          setJobs((prev) => prev.map((j) => j.id === job.id ? { ...j, status: 'error', error: message } : j));
+        }
+      } finally {
+        if (activeJobRef.current === job.id) activeJobRef.current = null;
+        if (abortRef.current === controller) abortRef.current = null;
+      }
+    };
+    void work();
+    // Очередь запускается при изменении статусов; запрос НЕ отменяется при закрытии просмотра.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs, auth]);
+
+  const downloadResult = (job: GenerationJob) => {
+    if (!job.result) return;
+    if (/^https?:/i.test(job.result)) {
+      window.open(job.result, '_blank', 'noopener');
       return;
     }
     const a = document.createElement('a');
-    a.href = resultImage;
-    a.download = `nanobanana-${Date.now()}.png`;
+    a.href = job.result;
+    a.download = `risovalka-${job.id}.png`;
     document.body.appendChild(a);
     a.click();
     a.remove();
+  };
+
+  const openResult = (id: string) => {
+    setQueueOpen(false);
+    setSelectedJobId(id);
+    setResultOpen(true);
+  };
+
+  const retryJob = (job: GenerationJob) => {
+    if (outstandingJobs >= 6) { showToast('error', 'Очередь переполнена.'); return; }
+    setJobs((prev) => prev.map((j) => j.id === job.id ? { ...j, status: 'queued', error: undefined } : j));
+    setResultOpen(false);
+  };
+
+  // ---------- Интерактивный режим «Миссия для ИИ» ----------
+  const challengeTasks: Record<string, string[]> = {
+    'Космос': ['Придумай животное, которое живёт на другой планете', 'Нарисуй космический корабль для путешествий с друзьями', 'Создай робота, который исследует неизвестную галактику'],
+    'Животные': ['Придумай нового зверя, смешав два любых животных', 'Нарисуй питомца с необычной суперспособностью', 'Создай морское животное, которого ещё никто не видел'],
+    'Сказки': ['Нарисуй героя новой доброй сказки', 'Придумай волшебное растение, исполняющее желания', 'Создай замок для необычного сказочного существа'],
+    'Роботы': ['Нарисуй робота, который помогает в школе', 'Придумай робота для уборки океана', 'Создай дружелюбного робота-помощника для космонавтов'],
+    'Подводный мир': ['Нарисуй подводный город для рыб', 'Придумай необычную подводную лодку', 'Создай светящееся существо из самых глубоких морей'],
+    'Своя идея': ['Нарисуй то, чего ещё никогда не существовало', 'Придумай полезное изобретение будущего', 'Создай героя с удивительной способностью'],
+  };
+  const pickChallenge = (category = challengeCategory) => {
+    const tasks = challengeTasks[category] || challengeTasks['Своя идея'];
+    const options = tasks.filter((task) => task !== lastChallengePrompt);
+    const next = options[Math.floor(Math.random() * options.length)] || tasks[0];
+    setChallengePrompt(next);
+    setLastChallengePrompt(next);
+  };
+  const leaveTelephone = () => {
+    if (telephoneMode && gamePhase === 'drawing' && hasDrawing &&
+        !window.confirm('Выйти из режима «Миссия для ИИ»? Твой рисунок останется на холсте.')) return;
+    setTelephoneMode(false);
+    setGamePhase('setup');
+  };
+  const startTelephone = () => {
+    if (hasDrawing && !window.confirm('Начать новое задание? Текущий рисунок будет очищен.')) return;
+    clearCanvas();
+    resetView();
+    // Сохраняем выбранное задание: при старте рисования не выбираем новое.
+    setGamePhase('drawing');
   };
 
   // ---------- Сохранение холстов ----------
@@ -716,8 +839,12 @@ export default function App() {
           <div className="subtitle">Рисуй что угодно — ИИ оживит именно твой рисунок</div>
         </div>
         <div className="top-actions">
-          <div className="status-pill">● РЕЖИМ: РИСУНОК → {styleInfo.name.toUpperCase()}</div>
-          <button type="button" className="top-btn" onClick={openLibrary}><FolderOpen size={18}/> Мои холсты</button>
+          <div className="mode-switch" role="group" aria-label="Режим сайта">
+            <button type="button" className={!telephoneMode ? 'active' : ''} onClick={leaveTelephone}>🎨 Рисовалка</button>
+            <button type="button" className={telephoneMode ? 'active' : ''} onClick={() => { setTelephoneMode(true); setGamePhase('setup'); }}>🤖 Миссия для ИИ</button>
+          </div>
+          <button type="button" className="top-btn queue-top-btn" onClick={() => setQueueOpen(true)}><Images size={18}/> Результаты {outstandingJobs ? `⏳${outstandingJobs}` : completedJobs ? `(${completedJobs})` : ''}</button>
+          <button type="button" className="top-btn" disabled={false} onClick={openLibrary}><FolderOpen size={18}/> Мои холсты</button>
           <button type="button" className="top-btn" onClick={logout} title="Выйти"><LogOut size={18}/></button>
         </div>
       </header>
@@ -805,10 +932,39 @@ export default function App() {
               <div ref={cursorRef} className={`tool-cursor ${tool === 'eraser' ? 'square' : ''}`} />
             </div>
 
+            {telephoneMode && gamePhase === 'drawing' && (
+              <div className="game-status mission-status">
+                <span>🎯 Задание</span><b>{challengePrompt}</b>
+                <button type="button" onClick={() => pickChallenge()} title="Другое задание">🎲 Другое</button>
+              </div>
+            )}
+            {telephoneMode && gamePhase === 'setup' && (
+              <div className="game-screen">
+                <div className="game-dialog mission-dialog">
+                  <img
+                    className="mission-cover"
+                    src="/mission-cover.png"
+                    alt="Заставка Nanobanana"
+                    onError={(event) => { event.currentTarget.style.display = 'none'; }}
+                  />
+                  <h2>Миссия для ИИ</h2>
+                  <p>Выбери тему, получи необычное задание и нарисуй свою идею. Затем нейросеть превратит твой набросок в иллюстрацию!</p>
+                  <label>Выбери тему</label>
+                  <div className="game-options mission-categories">{Object.keys(challengeTasks).map((category) => (
+                    <button key={category} className={challengeCategory === category ? 'active' : ''} onClick={() => { setChallengeCategory(category); const tasks = challengeTasks[category]; const task = tasks[Math.floor(Math.random() * tasks.length)]; setChallengePrompt(task); setLastChallengePrompt(task); }}>{category}</button>
+                  ))}</div>
+                  <div className="mission-prompt">💡 {challengePrompt || 'Выбери тему — и получи первое задание!'}</div>
+                  <div className="game-dialog-actions">
+                    <button className="game-secondary" onClick={() => pickChallenge()}>🎲 Другое задание</button>
+                    <button className="game-primary" onClick={startTelephone}><Play size={20}/> Начать рисовать</button>
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="canvas-history-controls" aria-label="История рисования">
-              <button type="button" disabled={!canUndo} onClick={undo} title="Отменить (Ctrl+Z)"><RotateCcw size={22}/><span>Назад</span></button>
-              <button type="button" disabled={!canRedo} onClick={redo} title="Повторить (Ctrl+Y)"><RotateCw size={22}/><span>Вперёд</span></button>
-              <button type="button" className="danger" onClick={clearCanvas} title="Очистить холст (можно отменить кнопкой «Назад»)"><Trash2 size={22}/><span>Очистить</span></button>
+              <button type="button" disabled={!canUndo || (telephoneMode && gamePhase !== 'drawing')} onClick={undo} title="Отменить (Ctrl+Z)"><RotateCcw size={22}/><span>Назад</span></button>
+              <button type="button" disabled={!canRedo || (telephoneMode && gamePhase !== 'drawing')} onClick={redo} title="Повторить (Ctrl+Y)"><RotateCw size={22}/><span>Вперёд</span></button>
+              <button type="button" className="danger" disabled={telephoneMode && gamePhase !== 'drawing'} onClick={clearCanvas} title="Очистить холст (можно отменить кнопкой «Назад»)"><Trash2 size={22}/><span>Очистить</span></button>
             </div>
 
             <div className="zoom-controls" aria-label="Масштаб холста">
@@ -820,25 +976,54 @@ export default function App() {
             <div className="board-hint">Полотно большое: выбери «Двигать холст», чтобы перейти к другому месту</div>
           </div>
 
-          <button className="magic-btn" disabled={loading} onClick={transform}>
-            <Sparkles size={25}/>
-            <span>
-              <b>Превратить мой рисунок!</b>
-              <small>Стиль: {styleInfo.name} · ИИ сохранит то, что я нарисовал</small>
-            </span>
-          </button>
+          {telephoneMode && gamePhase === 'drawing' ? (
+            <div className="mission-actions">
+              <button className="magic-btn" onClick={transform}>
+                <Sparkles size={25}/>
+                <span><b>Удивить нейросеть!</b><small>Задание: {challengePrompt || 'нарисуй свою идею'} · стиль: {styleInfo.name}</small></span>
+              </button>
+              <button className="game-secondary mission-finish" onClick={() => { setGamePhase('setup'); setTelephoneMode(true); }}>Выбрать новую миссию</button>
+            </div>
+          ) : (
+            <button className="magic-btn" onClick={transform}>
+              <Sparkles size={25}/>
+              <span><b>Превратить мой рисунок!</b><small>ИИ сохраняет твою задумку · стиль: {styleInfo.name}</small></span>
+            </button>
+          )}
         </main>
 
         <aside className="panel help-panel">
-          <h3>Как это работает</h3>
-          <div className="steps">
-            <div><b>1</b><span>Нарисуй любой предмет, героя или сцену.</span></div>
-            <div><b>2</b><span>Выбери стиль.</span></div>
-            <div><b>3</b><span>Нажми кнопку превращения.</span></div>
-          </div>
-          <div className="important">
-            <strong>🔒 Важное правило</strong>
-            <p>ИИ получает сам PNG с холста. Он не получает описание вроде «нарисуй кота» — его задача только преобразовать твой исходный рисунок.</p>
+          <h3>{telephoneMode ? 'Твоя миссия' : 'Как это работает'}</h3>
+          {telephoneMode ? (
+            <>
+              <div className="steps">
+                <div><b>1</b><span>Выбери тему и получи творческое задание.</span></div>
+                <div><b>2</b><span>Нарисуй свою идею на большом холсте.</span></div>
+                <div><b>3</b><span>Нажми «Удивить нейросеть!» и посмотри, как ИИ оживит рисунок.</span></div>
+              </div>
+              <div className="important"><strong>✨ Подсказка</strong><p>Не обязательно рисовать идеально — нейросеть должна сохранить твою задумку и добавить деталей.</p></div>
+            </>
+          ) : (
+            <>
+              <div className="steps">
+                <div><b>1</b><span>Нарисуй любой предмет, героя или сцену.</span></div>
+                <div><b>2</b><span>Выбери стиль и отправь рисунок в ИИ.</span></div>
+                <div><b>3</b><span>Продолжай рисовать и открой готовую картинку через «Результаты».</span></div>
+              </div>
+              <div className="important"><strong>🔒 Важное правило</strong><p>ИИ получает PNG с холста, но не получает текстового описания. Генерация идёт в фоне открытой вкладки.</p></div>
+            </>
+          )}
+          <div className="recent-jobs">
+            <h3>Генерации <span>{outstandingJobs ? `${outstandingJobs} в работе` : ''}</span></h3>
+            <div className="job-items">
+              {jobs.length === 0 && <p>Здесь появятся твои рисунки после отправки в ИИ.</p>}
+              {[...jobs].reverse().slice(0,5).map((job) => (
+                <button key={job.id} className="job-mini" onClick={() => openResult(job.id)}>
+                  <img src={job.result || job.image} alt="Миниатюра рисунка"/>
+                  <span><b>{STYLES.find((s) => s.id === job.styleId)?.name}</b><small>{job.status === 'queued' ? '⏳ В очереди' : job.status === 'running' ? '✨ Генерируется…' : job.status === 'done' ? '✅ Готово' : '⚠️ Ошибка'}</small></span>
+                </button>
+              ))}
+            </div>
           </div>
           <button className="sound-btn" onClick={() => setSound((v) => !v)}>{sound ? <Volume2 size={17}/> : <VolumeX size={17}/>} Звук {sound ? 'включён' : 'выключен'}</button>
         </aside>
@@ -892,43 +1077,63 @@ export default function App() {
         </div>
       )}
 
-      {resultOpen && (
+      {queueOpen && (
+        <div className="overlay" onClick={() => setQueueOpen(false)}>
+          <div className="queue-card" onClick={(e) => e.stopPropagation()}>
+            <button className="close-btn" onClick={() => setQueueOpen(false)} aria-label="Закрыть"><X size={20}/></button>
+            <h2>Галерея генераций</h2>
+            <p className="library-note">Рисуй дальше, пока картинки создаются. Запросы идут по очереди: сервер обрабатывает по одному. Результаты хранятся в этой вкладке до её закрытия.</p>
+            <div className="queue-grid">
+              {[...jobs].reverse().map((job) => (
+                <button key={job.id} className="queue-item" onClick={() => openResult(job.id)}>
+                  <img src={job.result || job.image} alt="Рисунок в очереди"/>
+                  <b>{STYLES.find((s) => s.id === job.styleId)?.name}</b>
+                  <small>{job.status === 'queued' ? '⏳ В очереди' : job.status === 'running' ? '✨ Генерируется' : job.status === 'done' ? '✅ Готово' : '⚠️ Ошибка'}</small>
+                </button>
+              ))}
+              {jobs.length === 0 && <p>Пока нет рисунков. Нарисуй что-нибудь и нажми «Отправить рисунок в ИИ».</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resultOpen && chosenJob && (
         <div className="overlay result-overlay">
           <div className="result-card">
-            <button className="close-btn" onClick={closeResult} aria-label="Закрыть"><X size={20}/></button>
+            <button className="close-btn" onClick={() => setResultOpen(false)} aria-label="Закрыть"><X size={20}/></button>
             <div className="result-head">
-              <span>{resultError ? '😕 Не получилось' : resultImage ? '🎉 Готово!' : '✨ Колдую…'}</span>
+              <span>{chosenJob.status === 'error' ? '😕 Не получилось' : chosenJob.status === 'done' ? '🎉 Готово!' : '✨ Генерируется в фоне'}</span>
               <h2>Твой рисунок в стиле «{resultStyleName}»</h2>
             </div>
             <div className="comparison">
-              <figure>
-                <figcaption>Твой рисунок</figcaption>
-                <img src={sourceImage ?? ''} alt="Исходный рисунок"/>
-              </figure>
+              <figure><figcaption>Исходный рисунок</figcaption><img src={chosenJob.image} alt="Исходный рисунок" /></figure>
               <figure>
                 <figcaption>Результат ИИ</figcaption>
-                {resultImage ? (
-                  <img src={resultImage} alt={`Результат в стиле ${resultStyleName}`}/>
-                ) : resultError ? (
-                  <div className="result-placeholder error">
-                    <div className="loader-emoji">🙈</div>
-                    <p>{resultError}</p>
-                  </div>
+                {chosenJob.result ? <img src={chosenJob.result} alt={`Результат в стиле ${resultStyleName}`}/> : chosenJob.status === 'error' ? (
+                  <div className="result-placeholder error"><div className="loader-emoji">🙈</div><p>{chosenJob.error}</p></div>
                 ) : (
                   <div className="result-placeholder">
-                    <div className="loader-icon"><span>🍌</span><Sparkles size={26}/></div>
-                    <h3>Оживляю именно твой рисунок</h3>
-                    <p>{tips[tipIndex % tips.length]}</p>
+                    <video
+                      className="result-loading-video"
+                      src="/loading.mp4"
+                      autoPlay
+                      muted
+                      loop
+                      playsInline
+                      aria-label="Анимация загрузки результата"
+                    />
+                    <h3>{chosenJob.status === 'queued' ? 'Рисунок ждёт очереди' : 'Оживляю твой рисунок'}</h3>
+                    <p>{chosenJob.status === 'queued' ? 'Следующий запрос запустится автоматически.' : tipsFor(resultStyleName)[tipIndex % 5]}</p>
                     <div className="loader-bar"><span/></div>
-                    <small>Это может занять несколько секунд</small>
+                    <small>Можно закрыть это окно и продолжить рисовать.</small>
                   </div>
                 )}
               </figure>
             </div>
             <div className="result-actions">
-              {resultError && <button onClick={transform}><Sparkles size={18}/> Попробовать снова</button>}
-              <button onClick={downloadResult} disabled={!resultImage}><Download size={18}/> Сохранить PNG</button>
-              <button onClick={closeResult}>Продолжить рисовать</button>
+              {chosenJob.status === 'error' && <button onClick={() => retryJob(chosenJob)}><Sparkles size={18}/> Повторить</button>}
+              <button onClick={() => downloadResult(chosenJob)} disabled={!chosenJob.result}><Download size={18}/> Сохранить PNG</button>
+              <button onClick={() => setResultOpen(false)}><Check size={17}/> Продолжить рисовать</button>
             </div>
           </div>
         </div>
