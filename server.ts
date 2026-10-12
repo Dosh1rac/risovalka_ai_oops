@@ -51,7 +51,7 @@ app.use((_req, res, next) => {
 });
 // Для логина достаточно крошечного тела — большие запросы без авторизации не принимаем.
 app.use('/api/login', express.json({ limit: '2kb' }));
-app.use(express.json({ limit: '100kb' }));
+app.use(express.json({ limit: '20mb' }));
 
 const STYLES: Record<string, string> = {
   'bright-cartoon': `a polished modern Western children's cartoon: friendly rounded shapes, bold smooth outlines, simple expressive forms, cheerful saturated colors, soft cel shading, playful proportions, clean animation-studio finish, readable silhouettes, bright family-friendly 2D illustration. Avoid Japanese anime aesthetics, manga linework, oversized anime eyes, dramatic anime lighting, or sharp stylized facial proportions.`,

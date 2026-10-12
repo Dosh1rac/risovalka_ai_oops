@@ -89,6 +89,7 @@ function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
+<<<<<<< HEAD
 /** Готовим отдельную копию для ИИ: находим нарисованные пиксели и крупно
  * размещаем рисунок в квадрате. Размер и содержимое рабочего холста не меняются. */
 function squareDataUrl(src: HTMLCanvasElement): string {
@@ -109,10 +110,65 @@ function squareDataUrl(src: HTMLCanvasElement): string {
       if (isMark) { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); }
     }
   }
+=======
+/** Подготовка изображения только для ИИ: убираем пустые поля, центрируем
+ * рисунок и уменьшаем размер PNG. Оригинальный холст остаётся неизменным. */
+function squareDataUrl(src: HTMLCanvasElement): string {
+  const outputSide = 1024;
+  const scanScale = Math.min(1, 1600 / Math.max(src.width, src.height));
+  const scan = document.createElement('canvas');
+  scan.width = Math.max(1, Math.round(src.width * scanScale));
+  scan.height = Math.max(1, Math.round(src.height * scanScale));
+  const scanCtx = scan.getContext('2d', { willReadFrequently: true })!;
+  scanCtx.fillStyle = '#FFFFFF';
+  scanCtx.fillRect(0, 0, scan.width, scan.height);
+  scanCtx.drawImage(src, 0, 0, scan.width, scan.height);
+  const { data } = scanCtx.getImageData(0, 0, scan.width, scan.height);
+
+  // Фон обычно белый, но при заливке холста может быть другого цвета.
+  // Берём наиболее частый цвет по восьми точкам на краях.
+  const edgePoints = [
+    [0, 0], [scan.width - 1, 0], [0, scan.height - 1],
+    [scan.width - 1, scan.height - 1],
+    [Math.floor(scan.width / 2), 0], [Math.floor(scan.width / 2), scan.height - 1],
+    [0, Math.floor(scan.height / 2)], [scan.width - 1, Math.floor(scan.height / 2)],
+  ];
+  const colors = new Map<string, { count: number; rgb: [number, number, number] }>();
+  for (const [x, y] of edgePoints) {
+    const i = (y * scan.width + x) * 4;
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const key = `${r >> 4},${g >> 4},${b >> 4}`;
+    const entry = colors.get(key);
+    if (entry) entry.count++;
+    else colors.set(key, { count: 1, rgb: [r, g, b] });
+  }
+  const mostCommon = [...colors.values()].sort((a, b) => b.count - a.count)[0];
+  const [bgR, bgG, bgB] = mostCommon && mostCommon.count >= 4
+    ? mostCommon.rgb : [255, 255, 255];
+
+  let minX = scan.width, minY = scan.height, maxX = -1, maxY = -1;
+  for (let y = 0; y < scan.height; y++) {
+    for (let x = 0; x < scan.width; x++) {
+      const i = (y * scan.width + x) * 4;
+      if (Math.max(
+        Math.abs(data[i] - bgR),
+        Math.abs(data[i + 1] - bgG),
+        Math.abs(data[i + 2] - bgB),
+      ) > 24) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  }
+
+>>>>>>> 13da82f (вот оно вот оно)
   const out = document.createElement('canvas');
-  out.width = side;
-  out.height = side;
+  out.width = outputSide;
+  out.height = outputSide;
   const ctx = out.getContext('2d')!;
+<<<<<<< HEAD
   ctx.fillStyle = '#FFFFFF';
   ctx.fillRect(0, 0, side, side);
   if (maxX < minX || maxY < minY) {
@@ -129,6 +185,42 @@ function squareDataUrl(src: HTMLCanvasElement): string {
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(src, cropX, cropY, cropW, cropH, (side - drawW) / 2, (side - drawH) / 2, drawW, drawH);
+=======
+  ctx.fillStyle = `rgb(${bgR}, ${bgG}, ${bgB})`;
+  ctx.fillRect(0, 0, outputSide, outputSide);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  // Если рисунок полностью пустой, сохраняем весь исходный холст.
+  if (maxX < 0) {
+    const scale = Math.min(outputSide / src.width, outputSide / src.height);
+    ctx.drawImage(src, (outputSide - src.width * scale) / 2,
+      (outputSide - src.height * scale) / 2, src.width * scale, src.height * scale);
+    return out.toDataURL('image/png');
+  }
+
+  const factorX = src.width / scan.width;
+  const factorY = src.height / scan.height;
+  const left = minX * factorX, top = minY * factorY;
+  const right = (maxX + 1) * factorX, bottom = (maxY + 1) * factorY;
+  const subjectW = right - left, subjectH = bottom - top;
+  // Сам рисунок занимает около 78% стороны готового квадрата.
+  // Отступ больше НЕ зависит от огромного исходного холста 9600x6000.
+  const scale = outputSide * 0.78 / Math.max(subjectW, subjectH);
+  const bleed = Math.max(2 * Math.max(factorX, factorY),
+    Math.max(subjectW, subjectH) * 0.12);
+  const cropL = Math.max(0, Math.floor(left - bleed));
+  const cropT = Math.max(0, Math.floor(top - bleed));
+  const cropR = Math.min(src.width, Math.ceil(right + bleed));
+  const cropB = Math.min(src.height, Math.ceil(bottom + bleed));
+  const cropW = cropR - cropL, cropH = cropB - cropT;
+  ctx.drawImage(
+    src, cropL, cropT, cropW, cropH,
+    (outputSide - subjectW * scale) / 2 - (left - cropL) * scale,
+    (outputSide - subjectH * scale) / 2 - (top - cropT) * scale,
+    cropW * scale, cropH * scale,
+  );
+>>>>>>> 13da82f (вот оно вот оно)
   return out.toDataURL('image/png');
 }
 
