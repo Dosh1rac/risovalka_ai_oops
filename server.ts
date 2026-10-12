@@ -150,11 +150,31 @@ async function uploadCanvasImage(image: string): Promise<string> {
   form.append('externalUserId', 'nanobanana-drawing-board');
   form.append('storagePolicy', 'TEMP_UPLOAD');
 
-  const r = await fetch(STORAGE_ENDPOINT, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${KEY}` },
-    body: form,
-  });
+  // Retry transient network failures; do not retry HTTP errors or hide the root cause.
+  let r: Response | undefined;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      r = await fetch(STORAGE_ENDPOINT, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${KEY}` },
+        body: form,
+        signal: AbortSignal.timeout(30000),
+      });
+      break;
+    } catch (error) {
+      lastError = error;
+      const e = error as Error & { cause?: unknown };
+      const cause = e.cause instanceof Error ? e.cause.message : String(e.cause ?? 'unknown');
+      console.error(`⚠️ Storage network attempt ${attempt}/3 failed: ${e.message}; cause: ${cause}`);
+      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 1500));
+    }
+  }
+  if (!r) {
+    const e = lastError as Error & { cause?: unknown };
+    const cause = e?.cause instanceof Error ? e.cause.message : String(e?.cause ?? 'unknown');
+    throw new Error(`Не удалось подключиться к Polza Storage после 3 попыток. ${e?.message || 'fetch failed'}; причина: ${cause}. Проверь интернет, DNS/TLS и доступность polza.ai.`);
+  }
   const { text, data } = await parseResponse(r);
   if (!r.ok) {
     const msg = data?.error?.message || data?.message || data?.detail || text.slice(0, 1200);

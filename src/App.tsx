@@ -89,28 +89,6 @@ function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-<<<<<<< HEAD
-/** Готовим отдельную копию для ИИ: находим нарисованные пиксели и крупно
- * размещаем рисунок в квадрате. Размер и содержимое рабочего холста не меняются. */
-function squareDataUrl(src: HTMLCanvasElement): string {
-  const side = Math.max(src.width, src.height);
-  const scan = document.createElement('canvas');
-  scan.width = src.width;
-  scan.height = src.height;
-  const scanCtx = scan.getContext('2d', { willReadFrequently: true })!;
-  scanCtx.drawImage(src, 0, 0);
-  const { data } = scanCtx.getImageData(0, 0, src.width, src.height);
-  let minX = src.width, minY = src.height, maxX = -1, maxY = -1;
-  // Белый/почти белый фон игнорируется; учитываем цветные и тёмные штрихи.
-  for (let y = 0; y < src.height; y++) {
-    for (let x = 0; x < src.width; x++) {
-      const i = (y * src.width + x) * 4;
-      const a = data[i + 3];
-      const isMark = a > 12 && (data[i] < 238 || data[i + 1] < 238 || data[i + 2] < 238);
-      if (isMark) { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); }
-    }
-  }
-=======
 /** Подготовка изображения только для ИИ: убираем пустые поля, центрируем
  * рисунок и уменьшаем размер PNG. Оригинальный холст остаётся неизменным. */
 function squareDataUrl(src: HTMLCanvasElement): string {
@@ -163,29 +141,10 @@ function squareDataUrl(src: HTMLCanvasElement): string {
     }
   }
 
->>>>>>> 13da82f (вот оно вот оно)
   const out = document.createElement('canvas');
   out.width = outputSide;
   out.height = outputSide;
   const ctx = out.getContext('2d')!;
-<<<<<<< HEAD
-  ctx.fillStyle = '#FFFFFF';
-  ctx.fillRect(0, 0, side, side);
-  if (maxX < minX || maxY < minY) {
-    ctx.drawImage(src, (side - src.width) / 2, (side - src.height) / 2);
-    return out.toDataURL('image/png');
-  }
-  const pad = Math.max(12, Math.round(side * 0.07));
-  const cropX = Math.max(0, minX - pad), cropY = Math.max(0, minY - pad);
-  const cropRight = Math.min(src.width, maxX + 1 + pad), cropBottom = Math.min(src.height, maxY + 1 + pad);
-  const cropW = cropRight - cropX, cropH = cropBottom - cropY;
-  const target = side * 0.86;
-  const scale = Math.min(target / cropW, target / cropH);
-  const drawW = cropW * scale, drawH = cropH * scale;
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(src, cropX, cropY, cropW, cropH, (side - drawW) / 2, (side - drawH) / 2, drawW, drawH);
-=======
   ctx.fillStyle = `rgb(${bgR}, ${bgG}, ${bgB})`;
   ctx.fillRect(0, 0, outputSide, outputSide);
   ctx.imageSmoothingEnabled = true;
@@ -220,7 +179,6 @@ function squareDataUrl(src: HTMLCanvasElement): string {
     (outputSide - subjectH * scale) / 2 - (top - cropT) * scale,
     cropW * scale, cropH * scale,
   );
->>>>>>> 13da82f (вот оно вот оно)
   return out.toDataURL('image/png');
 }
 
